@@ -1,0 +1,405 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { RotateCcw, Undo2, Info, AlertTriangle, Trophy, Cpu, Users, Volume2, VolumeX } from 'lucide-react';
+
+const BOARD_SIZE = 15;
+
+const App = () => {
+  const [board, setBoard] = useState(Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null)));
+  const [isBlackNext, setIsBlackNext] = useState(true);
+  const [history, setHistory] = useState([]);
+  const [winner, setWinner] = useState(null);
+  const [winningLine, setWinningLine] = useState([]);
+  const [winningMoves, setWinningMoves] = useState({ black: [], white: [] });
+  const [gameMode, setGameMode] = useState('pvp');
+  const [isAiThinking, setIsAiThinking] = useState(false);
+  const [isSoundEnabled, setIsSoundEnabled] = useState(true);
+
+  // Web Audio API 音效生成器
+  const audioCtx = useRef(null);
+
+  const playSound = (type) => {
+    if (!isSoundEnabled) return;
+    if (!audioCtx.current) {
+      audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    const ctx = audioCtx.current;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+
+    switch (type) {
+      case 'place': // 落子聲
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(800, now);
+        osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now);
+        osc.stop(now + 0.1);
+        break;
+      case 'alert': // 警告/提示聲
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(440, now);
+        osc.frequency.exponentialRampToValueAtTime(880, now + 0.05);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+        osc.start(now);
+        osc.stop(now + 0.2);
+        break;
+      case 'win': // 勝利聲
+        [523.25, 659.25, 783.99].forEach((freq, i) => {
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.connect(g);
+          g.connect(ctx.destination);
+          o.frequency.setValueAtTime(freq, now + i * 0.1);
+          g.gain.setValueAtTime(0.2, now + i * 0.1);
+          g.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+          o.start(now + i * 0.1);
+          o.stop(now + 0.6);
+        });
+        break;
+      default:
+        break;
+    }
+  };
+
+  const checkWin = useCallback((currentBoard, r, c, player) => {
+    const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
+    for (let [dr, dc] of directions) {
+      let count = 1;
+      let line = [[r, c]];
+      let nr = r + dr, nc = c + dc;
+      while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && currentBoard[nr][nc] === player) {
+        count++; line.push([nr, nc]); nr += dr; nc += dc;
+      }
+      nr = r - dr; nc = c - dc;
+      while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && currentBoard[nr][nc] === player) {
+        count++; line.push([nr, nc]); nr -= dr; nc -= dc;
+      }
+      if (count >= 5) return line;
+    }
+    return null;
+  }, []);
+
+  const calculateWinningMoves = useCallback((currentBoard) => {
+    const blackWins = [];
+    const whiteWins = [];
+    for (let r = 0; r < BOARD_SIZE; r++) {
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        if (currentBoard[r][c] === null) {
+          if (checkWin(currentBoard, r, c, 'black')) blackWins.push([r, c]);
+          if (checkWin(currentBoard, r, c, 'white')) whiteWins.push([r, c]);
+        }
+      }
+    }
+    return { black: blackWins, white: whiteWins };
+  }, [checkWin]);
+
+  const getAiMove = useCallback((currentBoard) => {
+    const moves = calculateWinningMoves(currentBoard);
+    if (moves.white.length > 0) return moves.white[0];
+    if (moves.black.length > 0) return moves.black[0];
+
+    let bestScore = -1;
+    let bestMove = null;
+    const center = Math.floor(BOARD_SIZE / 2);
+
+    for (let r = 0; r < BOARD_SIZE; r++) {
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        if (currentBoard[r][c] === null) {
+          let score = (BOARD_SIZE - Math.abs(r - center) - Math.abs(c - center)) * 0.1;
+          currentBoard[r][c] = 'white';
+          if (calculateWinningMoves(currentBoard).white.length > 0) score += 50;
+          currentBoard[r][c] = 'black';
+          if (calculateWinningMoves(currentBoard).black.length > 0) score += 40;
+          currentBoard[r][c] = null;
+
+          if (score > bestScore) {
+            bestScore = score;
+            bestMove = [r, c];
+          }
+        }
+      }
+    }
+    return bestMove || [center, center];
+  }, [calculateWinningMoves]);
+
+  const executeMove = (r, c, player) => {
+    playSound('place');
+    setBoard(prevBoard => {
+      const newBoard = prevBoard.map(row => [...row]);
+      newBoard[r][c] = player;
+      
+      const winLine = checkWin(newBoard, r, c, player);
+      if (winLine) {
+        setWinner(player);
+        setWinningLine(winLine);
+        playSound('win');
+      }
+      return newBoard;
+    });
+
+    setHistory(prev => [...prev, board]);
+    setIsBlackNext(prev => !prev);
+  };
+
+  const handleClick = (r, c) => {
+    if (board[r][c] || winner || isAiThinking) return;
+    executeMove(r, c, isBlackNext ? 'black' : 'white');
+  };
+
+  useEffect(() => {
+    if (gameMode === 'ai' && !isBlackNext && !winner) {
+      setIsAiThinking(true);
+      const timer = setTimeout(() => {
+        const [ar, ac] = getAiMove(board);
+        executeMove(ar, ac, 'white');
+        setIsAiThinking(false);
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [isBlackNext, gameMode, winner, getAiMove]);
+
+  useEffect(() => {
+    const moves = calculateWinningMoves(board);
+    setWinningMoves(moves);
+    
+    // 如果出現新的聽牌點，發出提示聲
+    const hasNewHint = isBlackNext 
+      ? (moves.black.length > 0 || moves.white.length > 0)
+      : (moves.white.length > 0 || moves.black.length > 0);
+    
+    if (hasNewHint && !winner) {
+      playSound('alert');
+    }
+  }, [board, calculateWinningMoves, isBlackNext]);
+
+  const undo = () => {
+    if (history.length === 0 || winner || isAiThinking) return;
+    if (gameMode === 'ai' && history.length >= 2) {
+      setBoard(history[history.length - 2]);
+      setHistory(history.slice(0, -2));
+    } else if (gameMode === 'pvp') {
+      setBoard(history[history.length - 1]);
+      setHistory(history.slice(0, -1));
+      setIsBlackNext(!isBlackNext);
+    }
+    playSound('place');
+  };
+
+  const resetGame = () => {
+    setBoard(Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null)));
+    setIsBlackNext(true);
+    setHistory([]);
+    setWinner(null);
+    setWinningLine([]);
+    setIsAiThinking(false);
+    playSound('place');
+  };
+
+  const isWinningSquare = (r, c) => winningLine.some(([wr, wc]) => wr === r && wc === c);
+  const currentPlayerMoves = isBlackNext ? winningMoves.black : winningMoves.white;
+  const opponentMoves = isBlackNext ? winningMoves.white : winningMoves.black;
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col items-center py-6 px-4 font-sans text-slate-800">
+      {/* 頂部選單 */}
+      <div className="max-w-5xl w-full mb-6 flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+        <div className="flex flex-col gap-2">
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
+            五子棋 <span className="text-blue-600">AI 音效版</span>
+          </h1>
+          <div className="flex gap-2">
+             <button 
+                onClick={() => { setGameMode('pvp'); resetGame(); }}
+                className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 transition-all ${gameMode === 'pvp' ? 'bg-blue-600 text-white shadow-md' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+             >
+                <Users className="w-3 h-3" /> 雙人對戰
+             </button>
+             <button 
+                onClick={() => { setGameMode('ai'); resetGame(); }}
+                className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 transition-all ${gameMode === 'ai' ? 'bg-purple-600 text-white shadow-md' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+             >
+                <Cpu className="w-3 h-3" /> 電腦對戰
+             </button>
+             <button 
+                onClick={() => setIsSoundEnabled(!isSoundEnabled)}
+                className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 transition-all ${isSoundEnabled ? 'bg-amber-100 text-amber-700 hover:bg-amber-200' : 'bg-slate-200 text-slate-400'}`}
+             >
+                {isSoundEnabled ? <Volume2 className="w-3 h-3" /> : <VolumeX className="w-3 h-3" />}
+                音效 {isSoundEnabled ? '開' : '關'}
+             </button>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-6">
+          <div className={`flex flex-col items-center p-2 rounded-xl transition-all ${isBlackNext && !winner ? 'bg-blue-50 scale-105 ring-1 ring-blue-100' : 'opacity-40'}`}>
+            <div className="w-8 h-8 rounded-full bg-slate-900 shadow-lg ring-2 ring-slate-800"></div>
+            <span className="text-[10px] font-bold mt-1 text-slate-900 tracking-wider">玩家 (黑)</span>
+          </div>
+          <div className="text-slate-300 font-black text-xl italic">VS</div>
+          <div className={`flex flex-col items-center p-2 rounded-xl transition-all ${!isBlackNext && !winner ? 'bg-purple-50 scale-105 ring-1 ring-purple-100' : 'opacity-40'}`}>
+            <div className="w-8 h-8 rounded-full bg-white border-2 border-slate-300 shadow-md"></div>
+            <span className="text-[10px] font-bold mt-1 text-slate-900 tracking-wider">
+              {gameMode === 'ai' ? '電腦 (白)' : '玩家 (白)'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col lg:flex-row gap-6 items-start justify-center w-full max-w-6xl">
+        
+        {/* 棋盤主體 */}
+        <div className="relative bg-[#dec596] p-4 rounded-xl shadow-2xl border-[12px] border-[#bc9a6c] select-none">
+          <div className="flex mb-1 ml-6">
+            {Array.from({length: BOARD_SIZE}).map((_, i) => (
+              <div key={i} className="w-8 text-[9px] text-center font-black text-yellow-950/40 uppercase">{i}</div>
+            ))}
+          </div>
+          
+          <div className="flex">
+            <div className="flex flex-col mr-1">
+              {Array.from({length: BOARD_SIZE}).map((_, i) => (
+                <div key={i} className="h-8 flex items-center text-[9px] font-black text-yellow-950/40">{i}</div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-15 bg-yellow-950/5" style={{ gridTemplateColumns: `repeat(${BOARD_SIZE}, minmax(0, 1fr))` }}>
+              {board.map((row, r) => (
+                row.map((cell, c) => {
+                  const isBlackWinHint = winningMoves.black.some(([wr, wc]) => wr === r && wc === c);
+                  const isWhiteWinHint = winningMoves.white.some(([wr, wc]) => wr === r && wc === c);
+                  const isMyWin = (isBlackNext && isBlackWinHint) || (!isBlackNext && isWhiteWinHint);
+                  const isOpWin = (isBlackNext && isWhiteWinHint) || (!isBlackNext && isBlackWinHint);
+
+                  return (
+                    <div
+                      key={`${r}-${c}`}
+                      onClick={() => handleClick(r, c)}
+                      className="relative w-8 h-8 flex items-center justify-center cursor-pointer group"
+                    >
+                      {/* 格線 */}
+                      <div className="absolute inset-0 pointer-events-none">
+                        <div className="absolute top-1/2 left-0 right-0 h-[1px] bg-yellow-950/30"></div>
+                        <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-yellow-950/30"></div>
+                        {((r === 7 && c === 7) || ([3, 11].includes(r) && [3, 11].includes(c))) && (
+                           <div className="absolute top-1/2 left-1/2 w-2 h-2 bg-yellow-950/60 rounded-full -translate-x-1/2 -translate-y-1/2"></div>
+                        )}
+                      </div>
+
+                      {/* 棋子渲染 */}
+                      {cell && (
+                        <div className={`
+                          z-10 w-7 h-7 rounded-full shadow-lg transition-all duration-300 transform-gpu
+                          ${cell === 'black' ? 'bg-gradient-to-br from-slate-600 via-slate-900 to-black' : 'bg-gradient-to-br from-white via-slate-100 to-slate-300 border border-slate-300'}
+                          ${isWinningSquare(r, c) ? 'scale-110 ring-4 ring-yellow-400 animate-bounce' : ''}
+                        `}></div>
+                      )}
+
+                      {/* 聽牌提示動畫 */}
+                      {!cell && !winner && !isAiThinking && (
+                        <>
+                          {isMyWin && <div className="z-0 absolute w-6 h-6 rounded-full bg-blue-500/40 border-2 border-blue-600 animate-pulse shadow-[0_0_12px_rgba(59,130,246,0.6)]"></div>}
+                          {isOpWin && <div className="z-0 absolute w-6 h-6 rounded-full bg-red-500/40 border-2 border-red-600 animate-ping shadow-[0_0_12px_rgba(239,68,68,0.6)]"></div>}
+                          <div className={`z-0 absolute w-6 h-6 rounded-full opacity-0 group-hover:opacity-30 transition-opacity transform scale-75 group-hover:scale-100 ${isBlackNext ? 'bg-black' : 'bg-white border border-slate-400'}`}></div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* 側邊資訊欄 */}
+        <div className="flex flex-col gap-4 w-full lg:w-80">
+          <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+            <h2 className="font-black text-lg mb-4 flex items-center gap-2 text-slate-700 tracking-tight">
+              <Info className="w-5 h-5 text-blue-500" />
+              戰局回報
+            </h2>
+            
+            {winner ? (
+              <div className="bg-yellow-50 border-2 border-yellow-200 p-6 rounded-2xl text-center shadow-inner animate-in fade-in zoom-in duration-300">
+                <Trophy className="w-12 h-12 text-yellow-500 mx-auto mb-2 drop-shadow-md" />
+                <p className="font-black text-2xl text-yellow-900">{winner === 'black' ? '黑方' : '白方'} 獲勝！</p>
+                <button onClick={resetGame} className="mt-4 text-xs font-bold text-yellow-700 underline decoration-2 underline-offset-4">再玩一局</button>
+              </div>
+            ) : isAiThinking ? (
+              <div className="flex flex-col items-center py-6 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                <div className="w-10 h-10 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+                <p className="text-xs font-black text-purple-600 mt-4 tracking-widest uppercase">電腦運算中...</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {currentPlayerMoves.length > 0 && (
+                  <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl shadow-sm ring-1 ring-blue-100 animate-in slide-in-from-right duration-300">
+                    <p className="text-sm font-black text-blue-900 flex items-center gap-2">
+                      <Volume2 className="w-4 h-4" /> 發現勝機！
+                    </p>
+                    <p className="text-xs text-blue-700 mt-1 font-medium">請落子於盤面藍色光圈位置。</p>
+                  </div>
+                )}
+                {opponentMoves.length > 0 && (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded-2xl shadow-sm ring-1 ring-red-100 animate-pulse">
+                    <p className="text-sm font-black text-red-900 flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4" /> 警告：對方聽牌
+                    </p>
+                    <p className="text-xs text-red-700 mt-1 font-medium">電腦或對手即將贏球，請攔截紅圈！</p>
+                  </div>
+                )}
+                {!currentPlayerMoves.length && !opponentMoves.length && (
+                  <div className="py-6 text-center border-2 border-dashed border-slate-100 rounded-2xl">
+                    <p className="text-slate-300 text-xs font-bold tracking-widest uppercase italic underline decoration-slate-200">穩定佈局中</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              onClick={undo}
+              disabled={history.length === 0 || !!winner || isAiThinking}
+              className="flex items-center justify-center gap-2 py-4 bg-white border-2 border-slate-100 rounded-2xl text-sm font-black text-slate-700 hover:bg-slate-50 hover:border-slate-200 disabled:opacity-40 transition-all active:scale-95"
+            >
+              <Undo2 className="w-4 h-4" /> 悔棋
+            </button>
+            <button
+              onClick={resetGame}
+              className="flex items-center justify-center gap-2 py-4 bg-slate-900 text-white rounded-2xl text-sm font-black hover:bg-slate-800 active:scale-95 transition-all shadow-lg"
+            >
+              <RotateCcw className="w-4 h-4" /> 重置
+            </button>
+          </div>
+
+          <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
+            <p className="text-[10px] text-slate-400 font-black uppercase mb-3 tracking-[0.2em]">戰術提示圖例</p>
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="w-3.5 h-3.5 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.8)] border border-blue-400"></div>
+                <span className="text-xs text-slate-600 font-black tracking-tight">藍圈：我方落子即勝點</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="w-3.5 h-3.5 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)] border border-red-400 animate-ping"></div>
+                <span className="text-xs text-slate-600 font-black tracking-tight">紅圈：對手絕殺防禦點</span>
+              </div>
+              <div className="pt-3 border-t border-slate-50">
+                 <p className="text-[10px] text-slate-400 italic">* 本遊戲使用 Web Audio 生成即時音效，請確保瀏覽器未靜音。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
