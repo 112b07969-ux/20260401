@@ -1,405 +1,447 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { RotateCcw, Undo2, Info, AlertTriangle, Trophy, Cpu, Users, Volume2, VolumeX } from 'lucide-react';
-
-const BOARD_SIZE = 15;
-
-const App = () => {
-  const [board, setBoard] = useState(Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null)));
-  const [isBlackNext, setIsBlackNext] = useState(true);
-  const [history, setHistory] = useState([]);
-  const [winner, setWinner] = useState(null);
-  const [winningLine, setWinningLine] = useState([]);
-  const [winningMoves, setWinningMoves] = useState({ black: [], white: [] });
-  const [gameMode, setGameMode] = useState('pvp');
-  const [isAiThinking, setIsAiThinking] = useState(false);
-  const [isSoundEnabled, setIsSoundEnabled] = useState(true);
-
-  // Web Audio API 音效生成器
-  const audioCtx = useRef(null);
-
-  const playSound = (type) => {
-    if (!isSoundEnabled) return;
-    if (!audioCtx.current) {
-      audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
-    }
-
-    const ctx = audioCtx.current;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    const now = ctx.currentTime;
-
-    switch (type) {
-      case 'place': // 落子聲
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(800, now);
-        osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
-        gain.gain.setValueAtTime(0.3, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
-        osc.start(now);
-        osc.stop(now + 0.1);
-        break;
-      case 'alert': // 警告/提示聲
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(440, now);
-        osc.frequency.exponentialRampToValueAtTime(880, now + 0.05);
-        gain.gain.setValueAtTime(0.1, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
-        osc.start(now);
-        osc.stop(now + 0.2);
-        break;
-      case 'win': // 勝利聲
-        [523.25, 659.25, 783.99].forEach((freq, i) => {
-          const o = ctx.createOscillator();
-          const g = ctx.createGain();
-          o.connect(g);
-          g.connect(ctx.destination);
-          o.frequency.setValueAtTime(freq, now + i * 0.1);
-          g.gain.setValueAtTime(0.2, now + i * 0.1);
-          g.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
-          o.start(now + i * 0.1);
-          o.stop(now + 0.6);
-        });
-        break;
-      default:
-        break;
-    }
-  };
-
-  const checkWin = useCallback((currentBoard, r, c, player) => {
-    const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
-    for (let [dr, dc] of directions) {
-      let count = 1;
-      let line = [[r, c]];
-      let nr = r + dr, nc = c + dc;
-      while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && currentBoard[nr][nc] === player) {
-        count++; line.push([nr, nc]); nr += dr; nc += dc;
-      }
-      nr = r - dr; nc = c - dc;
-      while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && currentBoard[nr][nc] === player) {
-        count++; line.push([nr, nc]); nr -= dr; nc -= dc;
-      }
-      if (count >= 5) return line;
-    }
-    return null;
-  }, []);
-
-  const calculateWinningMoves = useCallback((currentBoard) => {
-    const blackWins = [];
-    const whiteWins = [];
-    for (let r = 0; r < BOARD_SIZE; r++) {
-      for (let c = 0; c < BOARD_SIZE; c++) {
-        if (currentBoard[r][c] === null) {
-          if (checkWin(currentBoard, r, c, 'black')) blackWins.push([r, c]);
-          if (checkWin(currentBoard, r, c, 'white')) whiteWins.push([r, c]);
-        }
-      }
-    }
-    return { black: blackWins, white: whiteWins };
-  }, [checkWin]);
-
-  const getAiMove = useCallback((currentBoard) => {
-    const moves = calculateWinningMoves(currentBoard);
-    if (moves.white.length > 0) return moves.white[0];
-    if (moves.black.length > 0) return moves.black[0];
-
-    let bestScore = -1;
-    let bestMove = null;
-    const center = Math.floor(BOARD_SIZE / 2);
-
-    for (let r = 0; r < BOARD_SIZE; r++) {
-      for (let c = 0; c < BOARD_SIZE; c++) {
-        if (currentBoard[r][c] === null) {
-          let score = (BOARD_SIZE - Math.abs(r - center) - Math.abs(c - center)) * 0.1;
-          currentBoard[r][c] = 'white';
-          if (calculateWinningMoves(currentBoard).white.length > 0) score += 50;
-          currentBoard[r][c] = 'black';
-          if (calculateWinningMoves(currentBoard).black.length > 0) score += 40;
-          currentBoard[r][c] = null;
-
-          if (score > bestScore) {
-            bestScore = score;
-            bestMove = [r, c];
-          }
-        }
-      }
-    }
-    return bestMove || [center, center];
-  }, [calculateWinningMoves]);
-
-  const executeMove = (r, c, player) => {
-    playSound('place');
-    setBoard(prevBoard => {
-      const newBoard = prevBoard.map(row => [...row]);
-      newBoard[r][c] = player;
-      
-      const winLine = checkWin(newBoard, r, c, player);
-      if (winLine) {
-        setWinner(player);
-        setWinningLine(winLine);
-        playSound('win');
-      }
-      return newBoard;
-    });
-
-    setHistory(prev => [...prev, board]);
-    setIsBlackNext(prev => !prev);
-  };
-
-  const handleClick = (r, c) => {
-    if (board[r][c] || winner || isAiThinking) return;
-    executeMove(r, c, isBlackNext ? 'black' : 'white');
-  };
-
-  useEffect(() => {
-    if (gameMode === 'ai' && !isBlackNext && !winner) {
-      setIsAiThinking(true);
-      const timer = setTimeout(() => {
-        const [ar, ac] = getAiMove(board);
-        executeMove(ar, ac, 'white');
-        setIsAiThinking(false);
-      }, 600);
-      return () => clearTimeout(timer);
-    }
-  }, [isBlackNext, gameMode, winner, getAiMove]);
-
-  useEffect(() => {
-    const moves = calculateWinningMoves(board);
-    setWinningMoves(moves);
-    
-    // 如果出現新的聽牌點，發出提示聲
-    const hasNewHint = isBlackNext 
-      ? (moves.black.length > 0 || moves.white.length > 0)
-      : (moves.white.length > 0 || moves.black.length > 0);
-    
-    if (hasNewHint && !winner) {
-      playSound('alert');
-    }
-  }, [board, calculateWinningMoves, isBlackNext]);
-
-  const undo = () => {
-    if (history.length === 0 || winner || isAiThinking) return;
-    if (gameMode === 'ai' && history.length >= 2) {
-      setBoard(history[history.length - 2]);
-      setHistory(history.slice(0, -2));
-    } else if (gameMode === 'pvp') {
-      setBoard(history[history.length - 1]);
-      setHistory(history.slice(0, -1));
-      setIsBlackNext(!isBlackNext);
-    }
-    playSound('place');
-  };
-
-  const resetGame = () => {
-    setBoard(Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null)));
-    setIsBlackNext(true);
-    setHistory([]);
-    setWinner(null);
-    setWinningLine([]);
-    setIsAiThinking(false);
-    playSound('place');
-  };
-
-  const isWinningSquare = (r, c) => winningLine.some(([wr, wc]) => wr === r && wc === c);
-  const currentPlayerMoves = isBlackNext ? winningMoves.black : winningMoves.white;
-  const opponentMoves = isBlackNext ? winningMoves.white : winningMoves.black;
-
-  return (
-    <div className="min-h-screen bg-slate-50 flex flex-col items-center py-6 px-4 font-sans text-slate-800">
-      {/* 頂部選單 */}
-      <div className="max-w-5xl w-full mb-6 flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-        <div className="flex flex-col gap-2">
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-            五子棋 <span className="text-blue-600">AI 音效版</span>
-          </h1>
-          <div className="flex gap-2">
-             <button 
-                onClick={() => { setGameMode('pvp'); resetGame(); }}
-                className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 transition-all ${gameMode === 'pvp' ? 'bg-blue-600 text-white shadow-md' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-             >
-                <Users className="w-3 h-3" /> 雙人對戰
-             </button>
-             <button 
-                onClick={() => { setGameMode('ai'); resetGame(); }}
-                className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 transition-all ${gameMode === 'ai' ? 'bg-purple-600 text-white shadow-md' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-             >
-                <Cpu className="w-3 h-3" /> 電腦對戰
-             </button>
-             <button 
-                onClick={() => setIsSoundEnabled(!isSoundEnabled)}
-                className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 transition-all ${isSoundEnabled ? 'bg-amber-100 text-amber-700 hover:bg-amber-200' : 'bg-slate-200 text-slate-400'}`}
-             >
-                {isSoundEnabled ? <Volume2 className="w-3 h-3" /> : <VolumeX className="w-3 h-3" />}
-                音效 {isSoundEnabled ? '開' : '關'}
-             </button>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-6">
-          <div className={`flex flex-col items-center p-2 rounded-xl transition-all ${isBlackNext && !winner ? 'bg-blue-50 scale-105 ring-1 ring-blue-100' : 'opacity-40'}`}>
-            <div className="w-8 h-8 rounded-full bg-slate-900 shadow-lg ring-2 ring-slate-800"></div>
-            <span className="text-[10px] font-bold mt-1 text-slate-900 tracking-wider">玩家 (黑)</span>
-          </div>
-          <div className="text-slate-300 font-black text-xl italic">VS</div>
-          <div className={`flex flex-col items-center p-2 rounded-xl transition-all ${!isBlackNext && !winner ? 'bg-purple-50 scale-105 ring-1 ring-purple-100' : 'opacity-40'}`}>
-            <div className="w-8 h-8 rounded-full bg-white border-2 border-slate-300 shadow-md"></div>
-            <span className="text-[10px] font-bold mt-1 text-slate-900 tracking-wider">
-              {gameMode === 'ai' ? '電腦 (白)' : '玩家 (白)'}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex flex-col lg:flex-row gap-6 items-start justify-center w-full max-w-6xl">
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>東京 5 天 4 夜深度遊 - 2026 行程指南</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=Noto+Sans+JP:wght@300;400;500;700&display=swap');
         
-        {/* 棋盤主體 */}
-        <div className="relative bg-[#dec596] p-4 rounded-xl shadow-2xl border-[12px] border-[#bc9a6c] select-none">
-          <div className="flex mb-1 ml-6">
-            {Array.from({length: BOARD_SIZE}).map((_, i) => (
-              <div key={i} className="w-8 text-[9px] text-center font-black text-yellow-950/40 uppercase">{i}</div>
-            ))}
-          </div>
-          
-          <div className="flex">
-            <div className="flex flex-col mr-1">
-              {Array.from({length: BOARD_SIZE}).map((_, i) => (
-                <div key={i} className="h-8 flex items-center text-[9px] font-black text-yellow-950/40">{i}</div>
-              ))}
-            </div>
+        :root {
+            --tokyo-red: #E60012;
+            --tokyo-blue: #005596;
+            --glass: rgba(255, 255, 255, 0.85);
+        }
 
-            <div className="grid grid-cols-15 bg-yellow-950/5" style={{ gridTemplateColumns: `repeat(${BOARD_SIZE}, minmax(0, 1fr))` }}>
-              {board.map((row, r) => (
-                row.map((cell, c) => {
-                  const isBlackWinHint = winningMoves.black.some(([wr, wc]) => wr === r && wc === c);
-                  const isWhiteWinHint = winningMoves.white.some(([wr, wc]) => wr === r && wc === c);
-                  const isMyWin = (isBlackNext && isBlackWinHint) || (!isBlackNext && isWhiteWinHint);
-                  const isOpWin = (isBlackNext && isWhiteWinHint) || (!isBlackNext && isBlackWinHint);
+        body {
+            font-family: 'Noto Sans TC', 'Noto Sans JP', sans-serif;
+            background: #f8fafc;
+            background-image: radial-gradient(#e2e8f0 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
 
-                  return (
-                    <div
-                      key={`${r}-${c}`}
-                      onClick={() => handleClick(r, c)}
-                      className="relative w-8 h-8 flex items-center justify-center cursor-pointer group"
-                    >
-                      {/* 格線 */}
-                      <div className="absolute inset-0 pointer-events-none">
-                        <div className="absolute top-1/2 left-0 right-0 h-[1px] bg-yellow-950/30"></div>
-                        <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-yellow-950/30"></div>
-                        {((r === 7 && c === 7) || ([3, 11].includes(r) && [3, 11].includes(c))) && (
-                           <div className="absolute top-1/2 left-1/2 w-2 h-2 bg-yellow-950/60 rounded-full -translate-x-1/2 -translate-y-1/2"></div>
-                        )}
-                      </div>
+        .glass-card {
+            background: var(--glass);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
+        }
 
-                      {/* 棋子渲染 */}
-                      {cell && (
-                        <div className={`
-                          z-10 w-7 h-7 rounded-full shadow-lg transition-all duration-300 transform-gpu
-                          ${cell === 'black' ? 'bg-gradient-to-br from-slate-600 via-slate-900 to-black' : 'bg-gradient-to-br from-white via-slate-100 to-slate-300 border border-slate-300'}
-                          ${isWinningSquare(r, c) ? 'scale-110 ring-4 ring-yellow-400 animate-bounce' : ''}
-                        `}></div>
-                      )}
+        .day-btn.active {
+            background-color: var(--tokyo-red);
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(230, 0, 18, 0.3);
+        }
 
-                      {/* 聽牌提示動畫 */}
-                      {!cell && !winner && !isAiThinking && (
-                        <>
-                          {isMyWin && <div className="z-0 absolute w-6 h-6 rounded-full bg-blue-500/40 border-2 border-blue-600 animate-pulse shadow-[0_0_12px_rgba(59,130,246,0.6)]"></div>}
-                          {isOpWin && <div className="z-0 absolute w-6 h-6 rounded-full bg-red-500/40 border-2 border-red-600 animate-ping shadow-[0_0_12px_rgba(239,68,68,0.6)]"></div>}
-                          <div className={`z-0 absolute w-6 h-6 rounded-full opacity-0 group-hover:opacity-30 transition-opacity transform scale-75 group-hover:scale-100 ${isBlackNext ? 'bg-black' : 'bg-white border border-slate-400'}`}></div>
-                        </>
-                      )}
-                    </div>
-                  );
-                })
-              ))}
-            </div>
-          </div>
+        .hero-gradient {
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -9px;
+            top: 0;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--tokyo-red);
+            border: 4px solid white;
+            box-shadow: 0 0 0 2px var(--tokyo-red);
+        }
+
+        .fade-in {
+            animation: fadeIn 0.4s ease-out forwards;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .day-content { display: none; }
+        .day-content.active { display: block; }
+
+        /* 語言切換選單樣式 */
+        .lang-dropdown:hover .lang-menu {
+            display: block;
+        }
+    </style>
+</head>
+<body class="text-slate-800">
+
+    <!-- 語言切換 (右上角) -->
+    <div class="fixed top-4 right-4 z-[100] lang-dropdown">
+        <button class="glass-card px-4 py-2 rounded-full font-bold text-sm flex items-center gap-2 hover:bg-white transition-colors">
+            <i class="fas fa-globe"></i> <span id="current-lang-label">繁體中文</span>
+        </button>
+        <div class="lang-menu hidden absolute right-0 mt-2 w-32 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden">
+            <button onclick="changeLang('zh')" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50 transition-colors">繁體中文</button>
+            <button onclick="changeLang('en')" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50 transition-colors">English</button>
+            <button onclick="changeLang('ja')" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50 transition-colors">日本語</button>
         </div>
-
-        {/* 側邊資訊欄 */}
-        <div className="flex flex-col gap-4 w-full lg:w-80">
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-            <h2 className="font-black text-lg mb-4 flex items-center gap-2 text-slate-700 tracking-tight">
-              <Info className="w-5 h-5 text-blue-500" />
-              戰局回報
-            </h2>
-            
-            {winner ? (
-              <div className="bg-yellow-50 border-2 border-yellow-200 p-6 rounded-2xl text-center shadow-inner animate-in fade-in zoom-in duration-300">
-                <Trophy className="w-12 h-12 text-yellow-500 mx-auto mb-2 drop-shadow-md" />
-                <p className="font-black text-2xl text-yellow-900">{winner === 'black' ? '黑方' : '白方'} 獲勝！</p>
-                <button onClick={resetGame} className="mt-4 text-xs font-bold text-yellow-700 underline decoration-2 underline-offset-4">再玩一局</button>
-              </div>
-            ) : isAiThinking ? (
-              <div className="flex flex-col items-center py-6 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
-                <div className="w-10 h-10 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-                <p className="text-xs font-black text-purple-600 mt-4 tracking-widest uppercase">電腦運算中...</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {currentPlayerMoves.length > 0 && (
-                  <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl shadow-sm ring-1 ring-blue-100 animate-in slide-in-from-right duration-300">
-                    <p className="text-sm font-black text-blue-900 flex items-center gap-2">
-                      <Volume2 className="w-4 h-4" /> 發現勝機！
-                    </p>
-                    <p className="text-xs text-blue-700 mt-1 font-medium">請落子於盤面藍色光圈位置。</p>
-                  </div>
-                )}
-                {opponentMoves.length > 0 && (
-                  <div className="p-4 bg-red-50 border border-red-200 rounded-2xl shadow-sm ring-1 ring-red-100 animate-pulse">
-                    <p className="text-sm font-black text-red-900 flex items-center gap-2">
-                      <AlertTriangle className="w-4 h-4" /> 警告：對方聽牌
-                    </p>
-                    <p className="text-xs text-red-700 mt-1 font-medium">電腦或對手即將贏球，請攔截紅圈！</p>
-                  </div>
-                )}
-                {!currentPlayerMoves.length && !opponentMoves.length && (
-                  <div className="py-6 text-center border-2 border-dashed border-slate-100 rounded-2xl">
-                    <p className="text-slate-300 text-xs font-bold tracking-widest uppercase italic underline decoration-slate-200">穩定佈局中</p>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <button
-              onClick={undo}
-              disabled={history.length === 0 || !!winner || isAiThinking}
-              className="flex items-center justify-center gap-2 py-4 bg-white border-2 border-slate-100 rounded-2xl text-sm font-black text-slate-700 hover:bg-slate-50 hover:border-slate-200 disabled:opacity-40 transition-all active:scale-95"
-            >
-              <Undo2 className="w-4 h-4" /> 悔棋
-            </button>
-            <button
-              onClick={resetGame}
-              className="flex items-center justify-center gap-2 py-4 bg-slate-900 text-white rounded-2xl text-sm font-black hover:bg-slate-800 active:scale-95 transition-all shadow-lg"
-            >
-              <RotateCcw className="w-4 h-4" /> 重置
-            </button>
-          </div>
-
-          <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
-            <p className="text-[10px] text-slate-400 font-black uppercase mb-3 tracking-[0.2em]">戰術提示圖例</p>
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <div className="w-3.5 h-3.5 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.8)] border border-blue-400"></div>
-                <span className="text-xs text-slate-600 font-black tracking-tight">藍圈：我方落子即勝點</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="w-3.5 h-3.5 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)] border border-red-400 animate-ping"></div>
-                <span className="text-xs text-slate-600 font-black tracking-tight">紅圈：對手絕殺防禦點</span>
-              </div>
-              <div className="pt-3 border-t border-slate-50">
-                 <p className="text-[10px] text-slate-400 italic">* 本遊戲使用 Web Audio 生成即時音效，請確保瀏覽器未靜音。</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
-  );
-};
 
-export default App;
+    <!-- 頂部導航 -->
+    <header class="hero-gradient text-white py-12 px-6 text-center relative overflow-hidden">
+        <div class="relative z-10">
+            <h1 id="t-hero-title" class="text-4xl md:text-5xl font-bold mb-4">🇯🇵 東京 5 天 4 夜</h1>
+            <p id="t-hero-subtitle" class="text-lg opacity-80">經典與潮流深度遊 (2026 版)</p>
+            <div class="mt-6 flex justify-center gap-4">
+                <span class="bg-white/10 px-4 py-1 rounded-full text-sm"><i class="fas fa-calendar-alt mr-2"></i><span id="t-hero-date">2026 春季</span></span>
+                <span class="bg-white/10 px-4 py-1 rounded-full text-sm"><i class="fas fa-map-marker-alt mr-2"></i><span id="t-hero-stay">上野 / 銀座入住</span></span>
+            </div>
+        </div>
+        <div id="t-hero-bg-text" class="absolute top-0 right-0 text-white/5 text-9xl transform translate-x-1/4 -translate-y-1/4 select-none">TOKYO</div>
+    </header>
+
+    <main class="max-w-5xl mx-auto px-4 -mt-8 pb-20">
+        
+        <!-- 天數切換按鈕 -->
+        <nav class="flex justify-between md:justify-center gap-2 mb-8 overflow-x-auto pb-2 px-1">
+            <button onclick="showDay(1)" id="btn-1" class="day-btn active glass-card min-w-[80px] py-3 rounded-2xl font-bold transition-all">DAY 1</button>
+            <button onclick="showDay(2)" id="btn-2" class="day-btn glass-card min-w-[80px] py-3 rounded-2xl font-bold transition-all">DAY 2</button>
+            <button onclick="showDay(3)" id="btn-3" class="day-btn glass-card min-w-[80px] py-3 rounded-2xl font-bold transition-all">DAY 3</button>
+            <button onclick="showDay(4)" id="btn-4" class="day-btn glass-card min-w-[80px] py-3 rounded-2xl font-bold transition-all">DAY 4</button>
+            <button onclick="showDay(5)" id="btn-5" class="day-btn glass-card min-w-[80px] py-3 rounded-2xl font-bold transition-all">DAY 5</button>
+        </nav>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            <!-- 左側主要行程內容 (動態替換) -->
+            <div id="itinerary-container" class="lg:col-span-2">
+                <!-- 由 JavaScript 動態生成渲染內容 -->
+            </div>
+
+            <!-- 右側側邊欄 -->
+            <div class="space-y-6">
+                <!-- 匯率轉換 -->
+                <div class="glass-card p-6 rounded-3xl">
+                    <h3 id="t-tools-currency" class="font-bold text-lg mb-4 flex items-center gap-2">
+                        <i class="fas fa-coins text-yellow-500"></i> 即時匯率參考
+                    </h3>
+                    <div class="space-y-3">
+                        <div class="flex justify-between items-center bg-white/50 p-3 rounded-xl border">
+                            <span class="text-sm">1 TWD</span>
+                            <span class="font-bold text-blue-600">≈ 4.68 JPY</span>
+                        </div>
+                        <input type="number" id="twd-input" placeholder="輸入台幣金額" class="w-full p-3 rounded-xl border text-sm outline-none focus:ring-2 focus:ring-blue-400" oninput="convertCurrency()">
+                        <div id="jpy-result" class="text-center font-bold text-2xl text-slate-700 mt-2">0 JPY</div>
+                    </div>
+                </div>
+
+                <!-- 交通票券 -->
+                <div class="glass-card p-6 rounded-3xl border-l-4 border-blue-500">
+                    <h3 id="t-tools-transport" class="font-bold text-lg mb-4">🚇 必備交通卡</h3>
+                    <ul class="space-y-3 text-sm" id="t-transport-list">
+                        <!-- 動態填充 -->
+                    </ul>
+                </div>
+
+                <!-- 準備清單 -->
+                <div class="glass-card p-6 rounded-3xl">
+                    <h3 id="t-tools-prep" class="font-bold text-lg mb-4">🎒 出發前必做</h3>
+                    <div class="space-y-2" id="t-prep-list">
+                        <!-- 動態填充 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="fixed bottom-0 w-full glass-card border-t py-4 px-8 flex justify-around md:hidden z-50">
+        <i class="fas fa-map-marked-alt text-xl text-slate-400"></i>
+        <i class="fas fa-utensils text-xl text-slate-400"></i>
+        <i class="fas fa-camera text-xl text-tokyo-red"></i>
+        <i class="fas fa-info-circle text-xl text-slate-400"></i>
+    </footer>
+
+    <script>
+        const translations = {
+            zh: {
+                label: "繁體中文",
+                hero: { title: "🇯🇵 東京 5 天 4 夜", subtitle: "經典與潮流深度遊 (2026 版)", date: "2026 春季", stay: "上野 / 銀座入住", bg: "東京" },
+                tools: { currency: "即時匯率參考", currencyInput: "輸入台幣金額", transport: "🚇 必備交通卡", prep: "🎒 出發前必做" },
+                transport: ["<b>iPhone Suica:</b> 手機錢包直接加入。", "<b>72hr Subway Ticket:</b> 前四天無限搭乘地鐵。"],
+                prep: ["Visit Japan Web (QR Code)", "預約 SHIBUYA SKY 門票", "下載 Disney Resort App", "預訂機場行李宅配"],
+                days: [
+                    {
+                        title: "江戶風情與下町散策",
+                        items: [
+                            { time: "10:00 - 13:00", head: "抵達與入住 (上野)", desc: "搭乘 Skyliner 直達上野。推薦午餐：上野一蘭拉麵或山家豬排。" },
+                            { time: "14:00 - 17:00", head: "淺草雷門 & 仲見世通", desc: "穿著和服合照，必吃龜十銅鑼燒。從上野搭乘地鐵銀座線即可到達。", tags: ["#必拍地標", "#傳統美食"] },
+                            { time: "17:30 - 20:00", head: "東京晴空塔 (Skytree)", desc: "欣賞夕陽與夜景。晚餐推薦：利久牛舌或敘敘苑。" }
+                        ]
+                    },
+                    {
+                        title: "現代地標與數位藝術",
+                        items: [
+                            { time: "09:30 - 11:30", head: "明治神宮", desc: "感受森林與神宮的寧靜。搭乘山手線至原宿站。" },
+                            { time: "12:00 - 18:00", head: "原宿 & 澀谷 SHIBUYA SKY", desc: "午餐推薦 AFURI 柚子拉麵。SHIBUYA SKY 需提前一個月預訂門票。" },
+                            { time: "18:30 - 21:00", head: "麻布台之丘 (teamLab)", desc: "參觀 teamLab Borderless 藝術展，探索 2026 東京新地標。" }
+                        ]
+                    },
+                    {
+                        title: "夢幻主題樂園巡禮",
+                        isSpecial: true,
+                        specialContent: {
+                            head: "今日方案二選一",
+                            a: "A. 迪士尼海洋 - 2024 新園區「夢幻泉源」。",
+                            b: "B. 哈利波特影城 - 全球最大室內影城。",
+                            note: "晚餐建議：新宿享用燒肉「六歌仙」或「檸檬牛舌」。"
+                        }
+                    },
+                    {
+                        title: "海鮮美食與精品藝術",
+                        items: [
+                            { time: "09:00 - 12:00", head: "築地場外市場", desc: "必吃：海鮮丼、玉子燒、生蠔、和牛串燒。" },
+                            { time: "13:00 - 16:00", head: "銀座精品購物", desc: "逛 Ginza Six 與 Uniqlo 旗艦店。下午茶：銀座 篝 雞白湯拉麵。" },
+                            { time: "17:00 - 21:00", head: "秋葉原 & 日本橋藝術金魚", desc: "動漫迷的天堂秋葉原，以及夢幻的 Art Aquarium 水族館。" }
+                        ]
+                    },
+                    {
+                        title: "伴手禮衝刺與賦歸",
+                        items: [
+                            { time: "09:30 - 11:30", head: "上野阿美橫丁", desc: "購買藥妝與零食伴手禮的最佳地點。" },
+                            { time: "12:00 - 14:00", head: "東京車站一番街", desc: "最後採買 NY Perfect Cheese。午餐推薦拉麵街。" },
+                            { time: "15:00", head: "前往機場", desc: "搭乘 Skyliner 或 N'EX 準時出發。" }
+                        ]
+                    }
+                ]
+            },
+            en: {
+                label: "English",
+                hero: { title: "🇯🇵 Tokyo 5D4N", subtitle: "Classic & Trendy Guide (2026 Ed.)", date: "Spring 2026", stay: "Ueno / Ginza Stay", bg: "TOKYO" },
+                tools: { currency: "Exchange Rate", currencyInput: "Enter TWD amount", transport: "🚇 Transport Cards", prep: "🎒 Pre-trip Checklist" },
+                transport: ["<b>iPhone Suica:</b> Add directly to Apple Wallet.", "<b>72hr Subway Ticket:</b> Unlimited rides for first 4 days."],
+                prep: ["Visit Japan Web (QR Code)", "Book SHIBUYA SKY Tickets", "Download Disney Resort App", "Book Airport Luggage Delivery"],
+                days: [
+                    {
+                        title: "Edo Vibes & Shitamachi Walk",
+                        items: [
+                            { time: "10:00 - 13:00", head: "Arrival & Check-in (Ueno)", desc: "Take Skyliner from Narita. Lunch: Ichiran Ramen or Yamabe Tonkatsu." },
+                            { time: "14:00 - 17:00", head: "Asakusa Senso-ji", desc: "Wear a Kimono and visit Kaminarimon. Eat Kameju Dorayaki." },
+                            { time: "17:30 - 20:00", head: "Tokyo Skytree", desc: "City sunset view. Dinner: Rikyu Gyutan or Jojoen Yakiniku." }
+                        ]
+                    },
+                    {
+                        title: "Modern Landmarks & Digital Art",
+                        items: [
+                            { time: "09:30 - 11:30", head: "Meiji Jingu Shrine", desc: "Walk through the forest shrine. Take JR Yamanote to Harajuku." },
+                            { time: "12:00 - 18:00", head: "Harajuku & Shibuya Sky", desc: "Lunch: AFURI Yuzu Ramen. Pre-book Shibuya Sky 1 month early." },
+                            { time: "18:30 - 21:00", head: "Azabudai Hills (teamLab)", desc: "Visit teamLab Borderless at the new Azabudai Hills landmark." }
+                        ]
+                    },
+                    {
+                        title: "Dreamy Theme Park Day",
+                        isSpecial: true,
+                        specialContent: {
+                            head: "Choose Your Adventure",
+                            a: "A. DisneySea - Visit the new 'Fantasy Springs'.",
+                            b: "B. Harry Potter Studio Tour - World's largest indoor tour.",
+                            note: "Dinner: Yakiniku Rokkasen or Negishi Gyutan in Shinjuku."
+                        }
+                    },
+                    {
+                        title: "Seafood, Luxury & Akihabara",
+                        items: [
+                            { time: "09:00 - 12:00", head: "Tsukiji Outer Market", desc: "Fresh Seafood bowls, Tamagoyaki, and Wagyu skewers." },
+                            { time: "13:00 - 16:00", head: "Ginza Luxury Shopping", desc: "Visit Ginza Six and Uniqlo Global Flagship." },
+                            { time: "17:00 - 21:00", head: "Akihabara & Art Aquarium", desc: "Anime paradise and the dreamy Goldfish Art Aquarium." }
+                        ]
+                    },
+                    {
+                        title: "Last Minute Souvenirs & Departure",
+                        items: [
+                            { time: "09:30 - 11:30", head: "Ueno Ameyoko Market", desc: "Best place for snacks, pharmacy, and local vibes." },
+                            { time: "12:00 - 14:00", head: "Tokyo Station Character St.", desc: "Final call for NY Perfect Cheese and Ramen Street." },
+                            { time: "15:00", head: "To the Airport", desc: "Take Skyliner or N'EX on time." }
+                        ]
+                    }
+                ]
+            },
+            ja: {
+                label: "日本語",
+                hero: { title: "🇯🇵 東京 5泊4日", subtitle: "定番と最新を巡る (2026年版)", date: "2026年 春", stay: "上野 / 銀座 滞在", bg: "TOKYO" },
+                tools: { currency: "為替レート", currencyInput: "台湾元を入力", transport: "🚇 交通カード", prep: "🎒 出発前の準備" },
+                transport: ["<b>iPhone Suica:</b> ウォレットから直接追加。", "<b>地下鉄 72時間券:</b> 地下鉄乗り放題。"],
+                prep: ["Visit Japan Web 登録", "SHIBUYA SKY チケット予約", "ディズニー公式アプリDL", "空港配送サービスの予約"],
+                days: [
+                    {
+                        title: "江戸情緒と下町散策",
+                        items: [
+                            { time: "10:00 - 13:00", head: "到着・チェックイン (上野)", desc: "スカイライナーで上野へ。ランチ：一蘭またはとんかつ山家。" },
+                            { time: "14:00 - 17:00", head: "浅草雷門・仲見世通り", desc: "着物体験と雷門。亀十のどら焼きは必食。" },
+                            { time: "17:30 - 20:00", head: "東京スカイツリー", desc: "夜景鑑賞。夕食：利久の牛たん、または叙々苑。" }
+                        ]
+                    },
+                    {
+                        title: "現代のランドマークとデジタルアート",
+                        items: [
+                            { time: "09:30 - 11:30", head: "明治神宮", desc: "都会のオアシスを散策。山手線で原宿駅へ。" },
+                            { time: "12:00 - 18:00", head: "原宿・渋谷 SHIBUYA SKY", desc: "ランチ：AFURI。SHIBUYA SKYは事前予約必須。" },
+                            { time: "18:30 - 21:00", head: "麻布台ヒルズ (teamLab)", desc: "teamLab Borderlessを体験。2026年の新名所。" }
+                        ]
+                    },
+                    {
+                        title: "夢のテーマパーク巡り",
+                        isSpecial: true,
+                        specialContent: {
+                            head: "選べる2つのプラン",
+                            a: "A. ディズニーシー - 新エリア「ファンタジースプリングス」。",
+                            b: "B. ハリー・ポッター影城 - 世界最大級の屋内ツアー。",
+                            note: "夕食：新宿の焼肉「六歌仙」または「ねぎし」。"
+                        }
+                    },
+                    {
+                        title: "築地グルメと銀座の芸術",
+                        items: [
+                            { time: "09:00 - 12:00", head: "築地場外市場", desc: "海鮮丼、玉子焼き、和牛串など食べ歩き。" },
+                            { time: "13:00 - 16:00", head: "銀座ショッピング", desc: "Ginza Sixやユニクロ旗艦店を巡る。" },
+                            { time: "17:00 - 21:00", head: "秋葉原・アートアクアリウム", desc: "アニメの聖地と幻想的な金魚のアート展。" }
+                        ]
+                    },
+                    {
+                        title: "お土産と帰路",
+                        items: [
+                            { time: "09:30 - 11:30", head: "上野アメ横", desc: "ドラッグストアやお菓子のお土産探し。" },
+                            { time: "12:00 - 14:00", head: "東京駅一番街", desc: "NY Perfect Cheeseを購入。ランチはラーメンストリート。" },
+                            { time: "15:00", head: "空港へ", desc: "スカイライナーまたはN'EXで空港へ。" }
+                        ]
+                    }
+                ]
+            }
+        };
+
+        let currentLang = 'zh';
+        let currentDay = 1;
+
+        function renderStaticText() {
+            const t = translations[currentLang];
+            document.getElementById('current-lang-label').innerText = t.label;
+            document.getElementById('t-hero-title').innerText = t.hero.title;
+            document.getElementById('t-hero-subtitle').innerText = t.hero.subtitle;
+            document.getElementById('t-hero-date').innerText = t.hero.date;
+            document.getElementById('t-hero-stay').innerText = t.hero.stay;
+            document.getElementById('t-hero-bg-text').innerText = t.hero.bg;
+            document.getElementById('t-tools-currency').innerHTML = `<i class="fas fa-coins text-yellow-500"></i> ${t.tools.currency}`;
+            document.getElementById('twd-input').placeholder = t.tools.currencyInput;
+            document.getElementById('t-tools-transport').innerText = t.tools.transport;
+            document.getElementById('t-tools-prep').innerText = t.tools.prep;
+
+            // Transport List
+            const transportUl = document.getElementById('t-transport-list');
+            transportUl.innerHTML = t.transport.map(item => `
+                <li class="flex items-start gap-2">
+                    <i class="fas fa-check-circle text-green-500 mt-1"></i>
+                    <span>${item}</span>
+                </li>
+            `).join('');
+
+            // Prep List
+            const prepUl = document.getElementById('t-prep-list');
+            prepUl.innerHTML = t.prep.map(item => `
+                <label class="flex items-center gap-3 p-2 hover:bg-white/50 rounded-lg cursor-pointer">
+                    <input type="checkbox" class="w-4 h-4 rounded">
+                    <span class="text-sm">${item}</span>
+                </label>
+            `).join('');
+        }
+
+        function renderDayContent() {
+            const container = document.getElementById('itinerary-container');
+            container.innerHTML = ''; // Clear
+
+            const t = translations[currentLang];
+            
+            t.days.forEach((day, index) => {
+                const dayNum = index + 1;
+                const section = document.createElement('section');
+                section.id = `day-${dayNum}`;
+                section.className = `day-content ${dayNum === currentDay ? 'active' : ''} fade-in`;
+
+                let html = `
+                    <div class="flex items-center gap-3 mb-6">
+                        <span class="bg-red-100 text-red-600 w-10 h-10 flex items-center justify-center rounded-lg font-bold text-xl">${dayNum}</span>
+                        <h2 class="text-2xl font-bold">${day.title}</h2>
+                    </div>
+                `;
+
+                if (day.isSpecial) {
+                    html += `
+                        <div class="bg-purple-50 border border-purple-100 p-6 rounded-2xl mb-6">
+                            <h3 class="font-bold text-purple-800 mb-4"><i class="fas fa-star mr-2"></i>${day.specialContent.head}</h3>
+                            <div class="grid md:grid-cols-2 gap-4">
+                                <div class="bg-white p-4 rounded-xl shadow-sm border border-purple-200">
+                                    <p class="text-sm text-slate-600">${day.specialContent.a}</p>
+                                </div>
+                                <div class="bg-white p-4 rounded-xl shadow-sm border border-purple-200">
+                                    <p class="text-sm text-slate-600">${day.specialContent.b}</p>
+                                </div>
+                            </div>
+                            <p class="mt-4 text-sm text-purple-600 font-medium">${day.specialContent.note}</p>
+                        </div>
+                    `;
+                } else {
+                    html += `<div class="ml-4 border-l-2 border-slate-200 pl-8 space-y-10">`;
+                    day.items.forEach(item => {
+                        html += `
+                            <div class="relative timeline-item">
+                                <span class="text-sm font-medium text-slate-400">${item.time}</span>
+                                <h3 class="text-lg font-bold">${item.head}</h3>
+                                <p class="text-slate-600 mt-1">${item.desc}</p>
+                                ${item.tags ? `
+                                    <div class="mt-3 flex gap-2">
+                                        ${item.tags.map(tag => `<span class="text-xs bg-orange-100 text-orange-600 px-2 py-1 rounded">${tag}</span>`).join('')}
+                                    </div>
+                                ` : ''}
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                }
+
+                section.innerHTML = html;
+                container.appendChild(section);
+            });
+        }
+
+        function showDay(dayNumber) {
+            currentDay = dayNumber;
+            document.querySelectorAll('.day-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(`day-${dayNumber}`).classList.add('active');
+            document.querySelectorAll('.day-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(`btn-${dayNumber}`).classList.add('active');
+            window.scrollTo({ top: 300, behavior: 'smooth' });
+        }
+
+        function changeLang(lang) {
+            currentLang = lang;
+            document.documentElement.lang = lang === 'ja' ? 'ja' : (lang === 'zh' ? 'zh-Hant' : 'en');
+            renderStaticText();
+            renderDayContent();
+        }
+
+        function convertCurrency() {
+            const twd = document.getElementById('twd-input').value;
+            const rate = 4.68;
+            const result = document.getElementById('jpy-result');
+            if(twd > 0) {
+                const jpy = Math.round(twd * rate).toLocaleString();
+                result.innerText = jpy + " JPY";
+            } else {
+                result.innerText = "0 JPY";
+            }
+        }
+
+        // Initialize
+        window.onload = () => {
+            renderStaticText();
+            renderDayContent();
+        };
+    </script>
+</body>
+</html>
